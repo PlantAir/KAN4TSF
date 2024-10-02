@@ -64,7 +64,7 @@ class RevIN(nn.Module):
 
 
 class MyKan(nn.Module):
-    def __init__(self, hist_len, pred_len, var_num, num_experts=6, drop=0.05, revin_affine=True):
+    def __init__(self, hist_len, pred_len, var_num, num_experts=8, drop=0.05, revin_affine=True):
         super(MyKan, self).__init__()
         self.hist_len = hist_len
         self.pred_len = pred_len
@@ -81,6 +81,8 @@ class MyKan(nn.Module):
             WaveKANLayer(hist_len, pred_len, wavelet_type="mexican_hat", device="cuda"),
             WaveKANLayer(hist_len, pred_len, wavelet_type="mexican_hat", device="cuda"),
             DriftKANLayer(hist_len, pred_len),
+            DriftKANLayer(hist_len, pred_len),
+            MittagKANLayer(hist_len, pred_len),
             MittagKANLayer(hist_len, pred_len),
         ])
 
