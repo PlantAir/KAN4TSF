@@ -813,6 +813,157 @@ class RBFKANLayer(nn.Module):
         return output
 
 
+class MittagKANLayer(nn.Module):
+    """
+    NewKANLayer 使用基于 Mittag-Leffler 函数的基函数，
+    适用于建模长期股票波动，并允许调整微分的阶数。
+    """
+
+    def __init__(self, input_dim, output_dim, alpha=0.9, beta=1.0, num_terms=20, device='cuda'):
+        """
+        初始化 NewKANLayer。
+
+        参数：
+        - input_dim: 输入维度
+        - output_dim: 输出维度
+        - alpha: 分数阶参数，控制微分的阶数（0 < alpha <= 1）
+        - beta: 调整基函数形状的参数
+        - num_terms: 计算 Mittag-Leffler 函数时的级数展开项数
+        - device: 计算设备
+        """
+        super(MittagKANLayer, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.alpha = alpha
+        self.beta = beta
+        self.num_terms = num_terms
+        self.device = device
+
+        # 初始化权重和偏置
+        self.weights = nn.Parameter(torch.Tensor(output_dim, input_dim))
+        self.bias = nn.Parameter(torch.Tensor(output_dim))
+
+        # 初始化参数
+        nn.init.xavier_uniform_(self.weights)
+        nn.init.zeros_(self.bias)
+
+    def mittag_leffler(self, x, alpha, beta, num_terms):
+        """
+        计算 Mittag-Leffler 函数的近似值。
+
+        E_{alpha, beta}(x) = sum_{k=0}^{infty} x^k / Gamma(alpha * k + beta)
+
+        为了计算方便，我们使用前 num_terms 项的级数展开。
+
+        参数：
+        - x: 输入张量
+        - alpha: 分数阶参数
+        - beta: 参数
+        - num_terms: 级数展开的项数
+
+        返回值：
+        - y: Mittag-Leffler 函数的近似值
+        """
+        y = torch.zeros_like(x).to(self.device)
+        for k in range(num_terms):
+            numerator = x ** k
+            denominator = math.gamma(alpha * k + beta)
+            y = y + numerator / denominator
+        return y
+
+    def forward(self, x):
+        """
+        前向传播。
+
+        参数：
+        - x: 输入张量，形状为 (batch_size, input_dim)
+
+        返回值：
+        - 输出张量，形状为 (batch_size, output_dim)
+        """
+        # 线性变换
+        x_linear = F.linear(x, self.weights, self.bias)  # (batch_size, output_dim)
+
+        # 计算 Mittag-Leffler 激活函数
+        x_ml = self.mittag_leffler(x_linear, self.alpha, self.beta, self.num_terms)
+
+        return x_ml
+
+
+
+class DriftKANLayer(nn.Module):
+    """
+    DriftKANLayer 使用低频傅里叶基函数，
+    适用于捕捉长期的逐渐漂移趋势。
+    """
+    def __init__(self, input_dim, output_dim, num_frequencies=5, device='cuda'):
+        """
+        初始化 DriftKANLayer。
+
+        参数：
+        - input_dim: 输入维度
+        - output_dim: 输出维度
+        - num_frequencies: 使用的低频傅里叶基函数的数量
+        - device: 计算设备
+        """
+        super(DriftKANLayer, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.num_frequencies = num_frequencies
+        self.device = device
+
+        # 初始化频率参数，使用较低的频率
+        self.frequencies = nn.Parameter(torch.linspace(0.0, np.pi / 300, num_frequencies).unsqueeze(0))  # (1, num_frequencies)
+        self.phase_shifts = nn.Parameter(torch.zeros(1, num_frequencies))  # (1, num_frequencies)
+
+        # 初始化权重和偏置
+        self.weights = nn.Parameter(torch.Tensor(output_dim, input_dim * num_frequencies * 2))
+        self.bias = nn.Parameter(torch.Tensor(output_dim))
+
+        # 初始化参数
+        nn.init.xavier_uniform_(self.weights)
+        nn.init.zeros_(self.bias)
+
+    def forward(self, x):
+        """
+        前向传播。
+
+        参数：
+        - x: 输入张量，形状为 (batch_size, input_dim)
+
+        返回值：
+        - 输出张量，形状为 (batch_size, output_dim)
+        """
+        batch_size, input_dim = x.shape
+
+        # 扩展输入以匹配频率的形状
+        x_expanded = x.unsqueeze(2)  # (batch_size, input_dim, 1)
+
+        # 计算傅里叶基函数的输入：x * frequency + phase_shift
+        # 频率和相位移需要调整维度以进行广播
+        frequencies = self.frequencies.unsqueeze(1)  # (1, 1, num_frequencies)
+        phase_shifts = self.phase_shifts.unsqueeze(1)  # (1, 1, num_frequencies)
+
+        # 计算角度 theta = x * frequency + phase_shift
+        theta = x_expanded * frequencies + phase_shifts  # (batch_size, input_dim, num_frequencies)
+
+        # 计算 cos(theta) 和 sin(theta)
+        cos_theta = torch.cos(theta)  # (batch_size, input_dim, num_frequencies)
+        sin_theta = torch.sin(theta)  # (batch_size, input_dim, num_frequencies)
+
+        # 将 cos 和 sin 拼接在一起
+        features = torch.cat([cos_theta, sin_theta], dim=2)  # (batch_size, input_dim, num_frequencies * 2)
+
+        # 将特征展平，以便进行线性变换
+        features = features.view(batch_size, -1)  # (batch_size, input_dim * num_frequencies * 2)
+
+        # 线性变换
+        output = F.linear(features, self.weights, self.bias)  # (batch_size, output_dim)
+
+        return output
+
+
+
 class KANInterface(nn.Module):
     def __init__(self, in_features, out_features, layer_type, n_grid=None, degree=None, order=None, n_center=None):
         super(KANInterface, self).__init__()
